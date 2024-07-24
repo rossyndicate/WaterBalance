@@ -4,11 +4,9 @@
 \alias{get_snowpack}
 \title{Snowpack}
 \usage{
-get_snowpack(jtemp, snow, melt, sp.0 = NULL)
+get_snowpack(snow, melt, sp.0 = NULL)
 }
 \arguments{
-\item{jtemp}{the Jennings temperature extracted from the raster based on latitude and longitude.}
-
 \item{snow}{A time series vector of snowfall values.}
 
 \item{melt}{A time series vector of snowmelt.}
