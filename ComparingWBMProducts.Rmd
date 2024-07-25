@@ -1,0 +1,586 @@
+---
+title: "Comparison of NPS WBM Products"
+author: "Radical Open Science Syndicate"
+output:
+  html_document:
+    code_folding: show
+    toc: true
+    toc_float: true
+    toc_depth: 2
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE,
+                      error = FALSE,
+                      fig.height = 9, 
+                      fig.width = 10)
+
+library(tidyverse)
+library(plotly)
+library(terra)
+library(sf)
+```
+
+# Comparison of NPS WBM Products
+
+This RMarkdown compares data products associated with the NPS water balance model (WBM) including:
+
+1)  WBM outputs generated from the WBM R code (<https://doimspp.sharepoint.com/:f:/s/nps-nrss-imdiv/EkhiOXJpNKNMpTYuxNO5mBoBqZBScDcbpK5M03Ha61PoCw>)
+
+2)  WBM outputs generated for park centroids (<https://parkfutures.s3.us-west-2.amazonaws.com/park-centroid-wb/index.html>)
+
+3)  WBM outputs generated for grid cells across CONUS (<http://www.yellowstone.solutions/thredds/catalog/daily_or_monthly/v2_historical/gridmet_v_1_5_historical/catalog.html>)
+
+We selected Petersburg National Battlefield (PETE) as the location for comparison because model parameters were previously compiled for this site (found in <https://doimspp.sharepoint.com/:f:/s/nps-nrss-imdiv/EkhiOXJpNKNMpTYuxNO5mBoBqZBScDcbpK5M03Ha61PoCw>), reducing the chance for error in parameter selection.
+
+## WBM R Code
+
+The WBM R Code was obtained from R scripts found on the AWS sharepoint (<https://doimspp.sharepoint.com/:f:/s/nps-nrss-imdiv/EkhiOXJpNKNMpTYuxNO5mBoBqZBScDcbpK5M03Ha61PoCw>). This code was, we believe, used to produce the centroid WBM data that is hosted on the Thredds server (NPS Product #2 above). The directory contains example code that was used to run the WBM for the park centroid at the PETE site. In the example, 10 random points were selected within the MACA grid cell that overlaps with the park centroid. The WBM was then run for each point, which involved extracting spatial model parameters (e.g., slope, aspect, soil storage) at each point and then running the WBM for each point. The ten runs were then aggregated using a daily average to produce a daily timeseries for each WBM variable (i.e., runoff, PET, AET, etc).
+
+Here, we recreate this workflow in the steps outlined below:
+
+First, we load in the WBM R functions downloaded directly from sharepoint:
+
+```{r}
+source("csu_wbm_comparison/aws_r_tutorial/wbm_functions/ET_functions.R")
+source("csu_wbm_comparison/aws_r_tutorial/wbm_functions/WB_functions.R")
+```
+
+Next, we load in a .csv containing the model parameters associated with the 10 randomly-selected points. These parameters are inputs to the WBM and were supplied within the AWS directory. The directory also includes the R script that was presumably used to generate these parameters ("aws_r_tutorial/get_site_params.R"), though the specific datasets (rasters) required to run the script are not included.
+
+```{r}
+wb_sites <- read.csv("csu_wbm_comparison/aws_r_tutorial/PETE_site_parameters.csv") 
+```
+
+We now load in the climate data (i.e., temperature and precipitation) that are input to the WBM. For the historical period, climate data are sourced from GridMET. While we don't have access to the exact GridMET dataset that was used in the tutorial hosted on AWS (<https://doimspp.sharepoint.com/:f:/s/nps-nrss-imdiv/EkhiOXJpNKNMpTYuxNO5mBoBqZBScDcbpK5M03Ha61PoCw>), we do have access to the previously compiled climate data for PETE's centroid hosted on AWS (<https://parkfutures.s3.us-west-2.amazonaws.com/maca-tprh-data/index.html>). We assume this is the same climate dataset that was used previously and pull it in for the period ranging from 1979 to 2022. Based on our current understanding of the WBM, the model run is started in 1979, with the first year considered as a "warm up" period for both the centroid and the gridded WBM datasets (products #2 and #3).
+
+```{r}
+Historical <- read.csv("csu_wbm_comparison/aws_data_downloads/centroid_data/PETE_historical.csv")
+```
+
+Now, we are ready to run the WBM! The code below was pulled directly from the tutorial folders hosted on AWS (<https://doimspp.sharepoint.com/:f:/s/nps-nrss-imdiv/EkhiOXJpNKNMpTYuxNO5mBoBqZBScDcbpK5M03Ha61PoCw>). In it, the Oudin method is used to calculate daily PET. Prior to running the model, historical precipitation and temperature data are converted from millimeters to inches and from degrees Fahrenheit to Celsius.
+
+```{r}
+n <- nrow(wb_sites)
+#Threshold temperature (deg C) for growing degree-days calculation
+T.Base = 0 
+
+#Method for PET calculation 
+Method = "Oudin"  #Oudin is default method for daily PRISM and MACA data (containing only Tmax, Tmin, and Date). 
+
+#Date format
+DateFormat = "%m/%d/%Y"
+
+############################################################ CREATE CLIMATE INPUTS #############################################################
+#### Historical
+# Convert pr.In to mm and F to C
+Historical$ppt_mm <- (Historical$Precip..in.*25.4)
+Historical$tmax_C <- 5/9*(Historical$Tmax..F. - 32)
+Historical$tmin_C <- 5/9*(Historical$Tmin..F. - 32)
+Historical$tmean_C <- 5/9*(Historical$Tavg..F. - 32)
+
+######################################################### END CLIMATE INPUTS ####################################################################
+
+
+######################################################### CALCULATE WB VARIABLES ################################################################
+AllDailyWB<-list()
+DailyWB<-Historical
+
+for(i in 1:nrow(wb_sites)){
+  ID = wb_sites$SiteID[i] # KW: was previously "Site"
+  Lat = wb_sites$Lat[i]
+  Lon = wb_sites$Lon[i]
+  Elev = wb_sites$Elev[i] # KW: was previously "Elevation"
+  Aspect = wb_sites$Aspect[i]
+  Slope = wb_sites$Slope[i]
+  SWC.Max = wb_sites$SWC.Max[i]
+  Wind = wb_sites$Wind[i]
+  Snowpack.Init = wb_sites$Snowpack.Init[i]
+  Soil.Init = wb_sites$Soil.Init[i]
+  Shade.Coeff = wb_sites$Shade.Coeff[i]
+  
+  #Calculate daily water balance variables 
+  
+  DailyWB$ID = ID
+  DailyWB$doy <- yday(DailyWB$Date)
+  DailyWB$daylength = get_daylength(DailyWB$Date, Lat)
+  DailyWB$jtemp = as.numeric(get_jtemp(Lon, Lat))
+  DailyWB$F = get_freeze(DailyWB$jtemp, DailyWB$tmean_C)
+  DailyWB$RAIN = get_rain(DailyWB$ppt_mm, DailyWB$F)
+  DailyWB$SNOW = get_snow(DailyWB$ppt_mm, DailyWB$F)
+  DailyWB$MELT = get_melt(DailyWB$tmean_C, DailyWB$jtemp, hock=4, DailyWB$SNOW, Snowpack.Init)
+  DailyWB$PACK = get_snowpack(snow = DailyWB$SNOW, melt = DailyWB$MELT)
+  DailyWB$W = DailyWB$MELT + DailyWB$RAIN
+  if(Method == "Hamon"){
+    DailyWB$PET = ET_Hamon_daily(DailyWB)
+  } else {
+    if(Method == "Penman-Monteith"){
+      DailyWB$PET = ET_PenmanMonteith_daily(DailyWB)
+    } else {
+      if(Method == "Oudin"){
+        DailyWB$PET = get_OudinPET(DailyWB$doy, Lat, DailyWB$PACK, DailyWB$tmean_C, Slope, Aspect, Shade.Coeff)
+      } else {
+        print("Error - PET method not found")
+      }
+    }
+  }
+  DailyWB$PET = modify_PET(DailyWB$PET, Slope, Aspect, Lat, Shade.Coeff)
+  DailyWB$W_PET = DailyWB$W - DailyWB$PET
+  DailyWB$SOIL = get_soil(DailyWB$W, Soil.Init, DailyWB$PET, DailyWB$W_PET, SWC.Max)
+  DailyWB$DSOIL = diff(c(Soil.Init, DailyWB$SOIL))
+  DailyWB$AET = get_AET(DailyWB$W, DailyWB$PET, DailyWB$SOIL, Soil.Init)
+  DailyWB$W_ET_DSOIL = DailyWB$W - DailyWB$AET - DailyWB$DSOIL
+  DailyWB$D = DailyWB$PET - DailyWB$AET
+  DailyWB$GDD = get_GDD(DailyWB$tmean_C, T.Base)
+  AllDailyWB[[i]] = DailyWB
+}
+
+WBData<-do.call(rbind,AllDailyWB)
+```
+
+Lastly, we aggregate the 10 WBM outputs by date and grab the means for a handful of the WBM variables we want to compare. We also convert the output from milimeters (mm) to inches.
+
+```{r}
+WBData_coded <- do.call(rbind, AllDailyWB) %>%
+  group_by(Date, GCM) %>%
+    # convert to inches
+  dplyr::summarize(mean_runoff = mean(W_ET_DSOIL, na.rm = TRUE)/25.4,
+                   mean_pet = mean(PET, na.rm = TRUE)/25.4,
+                   mean_rain = mean(RAIN, na.rm = TRUE)/25.4,
+                   mean_snow = mean(SNOW, na.rm = TRUE)/25.4,
+                   mean_melt = mean(MELT, na.rm = TRUE)/25.4,
+                   mean_snowpack = mean(PACK, na.rm = TRUE)/25.4,
+                   mean_aet = mean(AET, na.rm = TRUE)/25.4) %>%
+  # Remove "warm up" year 
+  filter(year(as_date(Date)) > 1979)
+```
+
+## WBM Park Centroids
+
+Next, we load in the park centroid WBM data for PETE. This data was downloaded directly from AWS (<https://parkfutures.s3.us-west-2.amazonaws.com/park-centroid-wb/index.html>). We remove the first year of data (1979), assuming that this year constitutes the "warm up" period. Park Centroid WBM products are already reported in inches. Notably, from our understanding, the centroid WBM PET was calculated using the Oudin method.
+
+```{r}
+WBData_online_centroid <- read_csv("csu_wbm_comparison/aws_data_downloads/centroid_data/PETE_water_balance_historical.csv") %>%
+dplyr::filter(year(as_date(Date)) > 1979)
+```
+
+## WBM Gridded
+
+Next, we load in the gridded WBM product. This datasaet was downloaded directly from AWS and clipped to the PETE park boundary. The earliest available date for the gridded WBM is January 1, 1980, with 1979 climate data assumed to be used for a "warm up" simulation. Again, to our knowledge, the Oudin method was used to calculate PET in the gridded WBM. The python script "aws_python_script/tercek_script.py" contains the workflow that was used to develop the gridded dataset (provided by M. Tercek).
+
+```{r}
+WBData_online_grid <- rast("csu_wbm_comparison/aws_data_downloads/gridded_data/PETE_runoff_historic_gridmet_1980_2023.tif")
+
+# next we clip the grid to only grids that intersect our wb_sites points in PETE:
+NPS_points <- 
+  st_transform(sf::st_as_sf(wb_sites, coords = c("Lon", "Lat"), crs = 4326), 
+               st_crs(WBData_online_grid))
+
+grid_runoff <- 
+  terra::extract(WBData_online_grid, NPS_points) %>%
+  pivot_longer(cols = -ID) %>%
+  dplyr::group_by(name) %>%
+    # convert to inches
+  dplyr::summarize(mean_runoff = mean(value, na.rm = TRUE)/(25.4 * 10)) %>%
+  filter(name != "runoff_NA") %>%
+  mutate(date = as_date(sub(".*_", "", name))) %>%
+  filter(year(date) < 2023)
+
+WBData_online_grid <- rast("csu_wbm_comparison/aws_data_downloads/gridded_data/PETE_pet_historic_gridmet_1980_2023.tif")  
+  
+grid_pet <- terra::extract(WBData_online_grid, NPS_points) %>%
+  pivot_longer(cols = -ID) %>%
+  dplyr::group_by(name) %>%
+  # convert to inches
+  dplyr::summarize(mean_pet = mean(value, na.rm = TRUE)/(25.4 * 10)) %>%
+  filter(name != "PET_NA") %>%
+  mutate(date = as_date(sub(".*_", "", name))) %>%
+  filter(year(date) < 2023)
+
+WBData_online_grid <- rast("csu_wbm_comparison/aws_data_downloads/gridded_data/PETE_rain_historic_gridmet_1980_2023.tif")
+
+grid_rain <- terra::extract(WBData_online_grid, NPS_points) %>%
+  pivot_longer(cols = -ID) %>%
+  dplyr::group_by(name) %>%
+    # convert to inches
+  dplyr::summarize(mean_rain = mean(value, na.rm = TRUE)/ (25.4 * 10)) %>%
+  filter(name != "rain_NA") %>%
+  mutate(date = as_date(sub(".*_", "", name))) %>%
+  filter(year(date) < 2023)
+```
+
+## Comparing Outputs
+
+Now we compare several outputs for the three WBM datasets.
+
+### Runoff
+
+First, plot three ***runoff*** products together through time:
+
+```{r, fig.height = 3, fig.width = 6}
+ggplotly(
+ggplot() +
+    geom_point(data = WBData_online_centroid, aes(x = as_date(Date), y = `runoff in`, color = "Centroid"), cex = 0.75) +
+    geom_point(data = grid_runoff, aes(x = date, y = mean_runoff, color = "Gridded"), alpha = 0.6, cex = 0.75) +
+    geom_line(data = WBData_coded, aes(x = as_date(Date), y = mean_runoff, color = "R Code"), cex = 0.2, alpha = 0.8) +
+    theme_bw() +
+    scale_color_manual("", values = c("#E70870", "#256BF5","black")) +
+    labs(x = "Date", y = "Runoff (in)") 
+    )
+```
+
+Next, plot each of the WBM ***runoff*** products against one another to detect bias.
+
+```{r, fig.width = 6, fig.height = 2.5}
+year_colors <- c("#FFCA3A","#C3F73A","#578010","#E70870","#56104E","#745CFB","#002EA3")
+#interpolated_colors <- colorRampPalette(year_colors)(length(unique(year(WBData_coded$Date))))
+
+  one <- ggplot() +
+    #ggtitle("Runoff in") +
+    theme_bw() +
+    xlab("R Code WBM") +
+    ylab("Centroid WBM") +
+    geom_point(aes(x = WBData_coded$mean_runoff, 
+                   y = WBData_online_centroid$`runoff in`, 
+                   color = year(WBData_coded$Date)),
+               size = 1) +
+  geom_abline(slope = 1,
+              intercept = 0,
+              color = "gray70") +
+    #scale_color_manual(values = interpolated_colors) +
+    scale_color_gradientn(colours = year_colors) +
+    labs(color = "Year")
+
+ two <-  ggplot() +
+    theme_bw() +
+    xlab("R Code WBM") +
+    ylab("Gridded WBM") +
+    geom_point(aes(x = WBData_coded$mean_runoff,
+                   y = grid_runoff$mean_runoff,
+                   color = year(WBData_coded$Date)),
+               size = 1) +
+   geom_abline(slope = 1,
+              intercept = 0,
+              color = "gray70") +
+    scale_color_gradientn(colours = year_colors) +
+    labs(color = "Year")
+
+ three <-  ggplot() +
+    theme_bw() +
+    xlab("Centroid WBM") +
+    ylab("Gridded WBM") +
+    geom_point(aes(x = WBData_online_centroid$`runoff in`,
+                   y = grid_runoff$mean_runoff,
+                   color = year(WBData_coded$Date)),
+               size = 1) +
+   geom_abline(slope = 1,
+              intercept = 0,
+              color = "gray70") +
+    scale_color_gradientn(colours = year_colors) +
+    labs(color = "Year")
+
+ggpubr::ggarrange(one + theme(legend.position = "none"),
+                  two + theme(legend.position = "none"),
+                  three + theme(legend.position = "none"),
+                  ncol = 3, nrow = 1,
+  common.legend = TRUE, legend = "bottom") %>% 
+  ggpubr::annotate_figure(., top = ggpubr::text_grob("Runoff (in)"))
+```
+
+### PET
+
+All three ***PET*** products plotted together through time:
+
+```{r, fig.height = 3, fig.width = 6}
+#ggplotly(
+  ggplot() +
+    geom_point(data = WBData_online_centroid, aes(x = as_date(Date), y = `PET in`, color = "Centroid"), cex = 0.75) +
+    geom_point(data = grid_pet, aes(x = date, y = mean_pet, color = "Gridded"), alpha = 0.6, cex = 0.75) +
+    geom_line(data = WBData_coded, aes(x = as_date(Date), y = mean_pet, color = "R Code"), cex = 0.2) +
+    theme_bw() +
+  scale_color_manual("", values = c("#E70870", "#256BF5","black")) +
+    labs(x = "Date", y = "PET in")
+#)
+```
+
+Next, plot each of the WBM ***PET*** products against each other to detect bias.
+
+```{r, fig.width = 6, fig.height = 2.5}
+ one <- ggplot() +
+    theme_bw() +
+    xlab("R Code WBM") +
+    ylab("Centroid WBM") +
+    geom_point(aes(x = WBData_coded$mean_pet, 
+                   y = WBData_online_centroid$`PET in`, 
+                   color = year(WBData_coded$Date)),
+               size = 1) +
+  geom_abline(slope = 1,
+              intercept = 0,
+              color = "gray70") +
+    scale_color_gradientn(colours = year_colors) +
+    labs(color = "Year")
+
+ two <-  ggplot() +
+    theme_bw() +
+    xlab("R Code WBM") +
+    ylab("Gridded WBM") +
+    geom_point(aes(x = WBData_coded$mean_pet,
+                   y = grid_pet$mean_pet,
+                   color = year(WBData_coded$Date)),
+               size = 1) +
+   geom_abline(slope = 1,
+              intercept = 0,
+              color = "gray70") +
+    scale_color_gradientn(colours = year_colors) +
+    labs(color = "Year")
+
+ three <-  ggplot() +
+    theme_bw() +
+    xlab("Centroid WBM") +
+    ylab("Gridded WBM") +
+    geom_point(aes(x = WBData_online_centroid$`PET in`,
+                   y = grid_pet$mean_pet,
+                   color = year(WBData_coded$Date)),
+               size = 1) +
+   geom_abline(slope = 1,
+              intercept = 0,
+              color = "gray70") +
+    scale_color_gradientn(colours = year_colors) +
+    labs(color = "Year")
+
+ggpubr::ggarrange(one + theme(legend.position = "none"),
+                  two + theme(legend.position = "none"),
+                  three + theme(legend.position = "none"),  
+                  ncol = 3, nrow = 1,
+  common.legend = TRUE, legend = "bottom") %>% 
+  ggpubr::annotate_figure(., top = ggpubr::text_grob("PET (in)"))
+```
+
+### Rain
+
+All three ***rain*** products plotted together through time:
+
+```{r, fig.height = 3, fig.width = 6}
+  ggplotly(
+    ggplot() +
+    geom_point(data = WBData_online_centroid, aes(x = as_date(Date), y = `rain in`, color = "Centroid"), size = 0.75, alpha = 1) +
+    geom_point(data = grid_rain, aes(x = date, y = mean_rain, color = "Gridded"),size = 0.75, alpha = 0.6) +
+    geom_line(data = WBData_coded, aes(x = as_date(Date), y = mean_rain, color = "R Code"), cex = 0.2) +
+    theme_bw() +
+      scale_color_manual("", values = c("#E70870", "#256BF5","black")) +
+    labs(x = "Date", y = "Rain (in)")
+  )
+```
+
+Plot each of the WBM ***rain*** products against each other to detect bias.
+
+```{r, fig.width = 6, fig.height = 2.5}
+ one <- ggplot() +
+    theme_bw() +
+    xlab("R Code WBM") +
+    ylab("Centroid WBM") +
+    geom_point(aes(x = WBData_coded$mean_rain, 
+                   y = WBData_online_centroid$`rain in`, 
+                   color = year(WBData_coded$Date)),
+               size = 1) +
+  geom_abline(slope = 1,
+              intercept = 0,
+              color = "gray70") +
+    scale_color_gradientn(colours = year_colors) +
+    labs(color = "Year")
+
+ two <-  ggplot() +
+    theme_bw() +
+    xlab("R Code WBM") +
+    ylab("Gridded WBM") +
+    geom_point(aes(x = WBData_coded$mean_rain,
+                   y = grid_rain$mean_rain,
+                   color = year(WBData_coded$Date)),
+               size = 1) +
+   geom_abline(slope = 1,
+              intercept = 0,
+              color = "gray70") +
+    scale_color_gradientn(colours = year_colors) +
+    labs(color = "Year")
+
+ three <-  ggplot() +
+    theme_bw() +
+    xlab("Centroid WBM") +
+    ylab("Gridded WBM") +
+    geom_point(aes(x = WBData_online_centroid$`rain in`,
+                   y = grid_rain$mean_rain,
+                   color = year(WBData_coded$Date)),
+               size = 1) +
+   geom_abline(slope = 1,
+              intercept = 0,
+              color = "gray70") +
+    scale_color_gradientn(colours = year_colors) +
+    labs(color = "Year")
+
+ggpubr::ggarrange(one + theme(legend.position = "none"), 
+                  two + theme(legend.position = "none"), 
+                  three + theme(legend.position = "none"),  
+                  ncol = 3, nrow = 1,
+  common.legend = TRUE, legend = "bottom") %>% 
+  ggpubr::annotate_figure(., top = ggpubr::text_grob("Rain (in)"))
+```
+
+## Discussion
+
+The above plots show differences in runoff, PET, and rain from the three NPS WBM products. There is no clear bias between models, i.e., over- or under-estimation between the methods. The fact that rain differs between the two models suggests that differences are occurring early on in the model, likely with rain-snow partitioning.
+
+Based on discussions with the NPS group, we understand that the published centroid WBM products and gridded WBM products were developed with different intentions and are inherently different by design. Key differences that we have identified by comparing the two code sources (M. Tercek's python script (aws_python_script) and A. Runyon's R script (above)) include:
+
+-   The gridded dataset workfow (python) initiates soil water storage at full capacity, whereas the WBM R code initiates soil water storage at 0.
+
+-   The calculation of Oudin PET differs: the R code incorporates a shade coefficient to reduce PET (though it is set to NULL and therefore not in use), whereas the gridded workflow does not include this option. The WBM R code also sets PET to 0 if there is at least 2 mm of snowpack, whereas the gridded product sets PET to 0 if there is any snow (snowpack \> 0).
+
+-   The centroid WBM sampled parameters and ran the model for 10 points within the GridMET cell. The method for sampling parameters and running the WBM for the gridded dataset is less clear.
+
+-   Other discrepancies
+
+    -   The R WBM code applies varying conversion factors for celsius-to-Kelvin corrections (273.3, 273.16, and in one case, 237.3).
+
+    -   In the R WBM code, there is a potential redundancy in calculating PET. The `get_OudinPET()` function duplicates parts of the `modify_PET()` function. This could be intentional if the modify_PET function is not used with the Oudin method of calculating PET. However, both `get_OudinPET()` and `modify_PET()` are used in the published tutorial on AWS. (See lines 116-131 above.) Below are the two functions:
+
+```{r, eval = FALSE, echo = TRUE}
+get_OudinPET = function(doy, lat, snowpack, tmean, slope, aspect, shade.coeff=NULL){
+  d.r = 1 + 0.033*cos((2*pi/365)*doy)
+  declin = 0.409*sin((((2*pi)/365)*doy)-1.39)
+  lat.rad = (pi/180)*lat
+  sunset.ang = acos(-tan(lat.rad)*tan(declin))
+  R.a = ((24*60)/pi)*0.082*d.r*((sunset.ang*sin(lat.rad)*sin(declin)) + (cos(lat.rad)*cos(declin)*sin(sunset.ang)))
+  Oudin = ifelse(snowpack>2,0,ifelse(tmean>-5,(R.a*(tmean+5)*0.408)/100,0))
+  Folded_aspect = abs(180-abs((aspect)-225))
+  Heatload = (0.339+0.808*cos(lat*(pi/180))*cos(slope*(pi/180)))-(0.196*sin(lat.rad)*sin(slope*(pi/180)))-(0.482*cos(Folded_aspect*(pi/180))*sin(slope*(pi/180)))
+  sc = ifelse(!is.null(shade.coeff), shade.coeff, 1)
+  OudinPET = Oudin * Heatload * sc
+  return(OudinPET)
+}
+
+modify_PET = function(pet, slope, aspect, lat, freeze, shade.coeff=NULL){
+  f.aspect = abs(180 - abs(aspect - 225))
+  lat.rad = ifelse(lat > 66.7, (66.7/180)*pi, (lat/180)*pi)
+  slope.rad = (slope/180)*pi
+  aspect.rad = (f.aspect/180)*pi
+  heat.load = 0.339+0.808*cos(lat.rad)*cos(slope.rad) - 0.196*sin(lat.rad)*sin(slope.rad) - 0.482*cos(aspect.rad)*sin(slope.rad)
+  sc = ifelse(!is.null(shade.coeff), shade.coeff, 1)
+  freeze = ifelse(freeze == 0,0,1)
+  PET.Lutz = pet*heat.load*sc*freeze
+  return(PET.Lutz)
+}
+```
+
+Of note, the exclusion of the `modify_PET()` step does not lead to a major change in values. Below is a plot of the difference between a runoff output that uses `modify_PET()` and the runoff output that does not use `modify_PET()`:
+
+```{r, fig.height = 4, fig.width = 6}
+n <- nrow(wb_sites)
+#Threshold temperature (deg C) for growing degree-days calculation
+T.Base = 0 
+
+#Method for PET calculation 
+Method = "Oudin"  #Oudin is default method for daily PRISM and MACA data (containing only Tmax, Tmin, and Date). 
+
+#Date format
+DateFormat = "%m/%d/%Y"
+
+############################################################ CREATE CLIMATE INPUTS #############################################################
+#### Historical
+# Convert pr.In to mm and F to C
+Historical$ppt_mm <- (Historical$Precip..in.*25.4)
+Historical$tmax_C <- 5/9*(Historical$Tmax..F. - 32)
+Historical$tmin_C <- 5/9*(Historical$Tmin..F. - 32)
+Historical$tmean_C <- 5/9*(Historical$Tavg..F. - 32)
+
+######################################################### END CLIMATE INPUTS ####################################################################
+
+
+######################################################### CALCULATE WB VARIABLES ################################################################
+AllDailyWB<-list()
+DailyWB<-Historical
+
+for(i in 1:nrow(wb_sites)){
+  ID = wb_sites$SiteID[i] # KW: was previously "Site"
+  Lat = wb_sites$Lat[i]
+  Lon = wb_sites$Lon[i]
+  Elev = wb_sites$Elev[i] # KW: was previously "Elevation"
+  Aspect = wb_sites$Aspect[i]
+  Slope = wb_sites$Slope[i]
+  SWC.Max = wb_sites$SWC.Max[i]
+  Wind = wb_sites$Wind[i]
+  Snowpack.Init = wb_sites$Snowpack.Init[i]
+  Soil.Init = wb_sites$Soil.Init[i]
+  Shade.Coeff = wb_sites$Shade.Coeff[i]
+  
+  #Calculate daily water balance variables 
+  
+  DailyWB$ID = ID
+  DailyWB$doy <- yday(DailyWB$Date)
+  DailyWB$daylength = get_daylength(DailyWB$Date, Lat)
+  DailyWB$jtemp = as.numeric(get_jtemp(Lon, Lat))
+  DailyWB$F = get_freeze(DailyWB$jtemp, DailyWB$tmean_C)
+  DailyWB$RAIN = get_rain(DailyWB$ppt_mm, DailyWB$F)
+  DailyWB$SNOW = get_snow(DailyWB$ppt_mm, DailyWB$F)
+  DailyWB$MELT = get_melt(DailyWB$tmean_C, DailyWB$jtemp, hock=4, DailyWB$SNOW, Snowpack.Init)
+  DailyWB$PACK = get_snowpack(snow = DailyWB$SNOW, melt = DailyWB$MELT)
+  DailyWB$W = DailyWB$MELT + DailyWB$RAIN
+  if(Method == "Hamon"){
+    DailyWB$PET = ET_Hamon_daily(DailyWB)
+  } else {
+    if(Method == "Penman-Monteith"){
+      DailyWB$PET = ET_PenmanMonteith_daily(DailyWB)
+    } else {
+      if(Method == "Oudin"){
+        DailyWB$PET = get_OudinPET(DailyWB$doy, Lat, DailyWB$PACK, DailyWB$tmean_C, Slope, Aspect, Shade.Coeff)
+      } else {
+        print("Error - PET method not found")
+      }
+    }
+  }
+  #DailyWB$PET = modify_PET(DailyWB$PET, Slope, Aspect, Lat, Shade.Coeff)
+  DailyWB$W_PET = DailyWB$W - DailyWB$PET
+  DailyWB$SOIL = get_soil(DailyWB$W, Soil.Init, DailyWB$PET, DailyWB$W_PET, SWC.Max)
+  DailyWB$DSOIL = diff(c(Soil.Init, DailyWB$SOIL))
+  DailyWB$AET = get_AET(DailyWB$W, DailyWB$PET, DailyWB$SOIL, Soil.Init)
+  DailyWB$W_ET_DSOIL = DailyWB$W - DailyWB$AET - DailyWB$DSOIL
+  DailyWB$D = DailyWB$PET - DailyWB$AET
+  DailyWB$GDD = get_GDD(DailyWB$tmean_C, T.Base)
+  AllDailyWB[[i]] = DailyWB
+}
+
+WBData_coded_no_modify_PET <- do.call(rbind, AllDailyWB) %>%
+  group_by(Date, GCM) %>%
+    # convert to inches
+  dplyr::summarize(mean_runoff = mean(W_ET_DSOIL, na.rm = TRUE)/25.4,
+                   mean_pet = mean(PET, na.rm = TRUE)/25.4,
+                   mean_rain = mean(RAIN, na.rm = TRUE)/25.4,
+                   mean_snow = mean(SNOW, na.rm = TRUE)/25.4,
+                   mean_melt = mean(MELT, na.rm = TRUE)/25.4,
+                   mean_snowpack = mean(PACK, na.rm = TRUE)/25.4,
+                   mean_aet = mean(AET, na.rm = TRUE)/25.4) %>%
+  # Remove "warm up" year 
+  filter(year(as_date(Date)) > 1979)
+
+ggplot() +
+  geom_line(data = WBData_coded, aes(x = as_date(Date), y = mean_runoff, color = "With ET Mod")) +
+  geom_point(data = WBData_coded_no_modify_PET, aes(x = as_date(Date), y = mean_runoff, color = "Without ET Mod"), alpha = 1,cex = .5) +
+  #geom_col(aes(x = as_date(WBData_coded$Date), y = WBData_coded$mean_runoff - WBData_coded_no_modify_PET$mean_runoff), color = "#578010") +
+  theme_bw() +
+  scale_color_manual("", values = c("black","#E70870")) +
+  ggtitle("ET Modification Comparison") +
+  xlab("Date") +
+  ylab("Runoff (in)")
+```
+
+Some other possible explanations for differences between the three products include:
+
+1)  We assumed that the coordinates provided in the folder hosted on AWS ("aws_r_tutorial/PETE_site_parameters.csv") were used in developing PETE's published centroid data. However, this may not be the case.
+
+2)  We were unable to find the exact historical climate dataset used in the AWS tutorial. Instead, we used PETE's centroid's historical GridMET data posted on AWS (<https://parkfutures.s3.us-west-2.amazonaws.com/maca-tprh-data/index.html>). If a different data set was used to generate the centroid data, this could also explain the discrepancies.
+
+3)  The code we are running starts the WBM in the year 1979. Though we believe that 1979 is also the year used to initiate the centroid data, it is possible another year was used as the starting point.
+
+4) Again, methodology surrounding point-selection for model runs is relatively unclear for both the gridded and centroid WBM datasets. Clarification on these matters could lead to a match with the existing model functions.
