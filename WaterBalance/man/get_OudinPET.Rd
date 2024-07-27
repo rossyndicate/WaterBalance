@@ -4,12 +4,12 @@
 \alias{get_OudinPET}
 \title{Oudin Daily PET}
 \usage{
-get_OudinPET(doy, lat, snowpack, tmean, slope, aspect, shade.coeff = NULL)
+get_OudinPET(doy, lat, snowpack, tmean, slope, aspect, shade.coeff = 1)
 }
 \arguments{
 \item{doy}{Day-of-year (Julian date)}
 
-\item{lat}{Latitude of the site (degrees).}
+\item{lat}{Latitude of the site (degrees) from 30-60 degrees.}
 
 \item{snowpack}{A time series vector of snowpack accumulation values.}
 

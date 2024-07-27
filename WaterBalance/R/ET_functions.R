@@ -7,6 +7,27 @@
 ## Future updates - adding more ET calculation methods
 ###################################################################################
 
+#' Degrees to Radians
+#'
+#' Convert degrees to radians
+#' @param degrees Angle in Degrees
+#' @export
+#' deg2rad()
+
+deg2rad <- function(degrees) {
+  degrees * (pi / 180)
+}
+
+#' Folded aspect
+#'
+#' "Folds" aspect over N-S line, so aspects are limited to 0-180
+#' degrees
+#' @param aspect Aspect in degrees (0-360)
+
+fold_aspect <- function(aspect) {
+  abs(180 - abs(aspect - 225))
+}
+
 #' Daylength
 #'
 #' Returns daylength in hours for a series of dates, based on latitude. Calls the 'geosphere' package.
@@ -210,27 +231,54 @@ ET_PenmanMonteith_daily = function(x, elev, lat, wind=NULL){
     e.a = vp
   }
 
-  #Solar angle and radiation calculations
-  R.ns = (1 - 0.23)*R.s
+  # Solar angle and radiation calculations
+  R.ns = (1 - 0.23) * R.s
   R.so = clear_sky_rad(doy, lat, elev)
   R.nl = outgoing_rad(tmax, tmin, R.s, e.a, R.so)
   R.n = R.ns - R.nl
-  R.ng = 0.408*R.n
+  R.ng = 0.408 * R.n
 
-  #ET from radiation
-  ET.rad = DT*R.ng
-  #ET from wind
-  ET.wind = PT*TT*(e.s - e.a)
-  #Total ET
+  # ET from radiation
+  ET.rad = DT * R.ng
+  # ET from wind
+  ET.wind = PT * TT * (e.s - e.a)
+  # Total ET
   ET.o = ET.rad + ET.wind
   return(ET.o)
 }
+
+#' Heatload
+#'
+#' Estimate potential annual direct incident radiation from slope,
+#' aspect, and latitude.  From McCune, B., and Keon, D., 2002,
+#' Equations for Potential Annual Direct Incident Radiation and Heat
+#' Load: Journal of Vegetation Science, v. 13, p. 603–606.
+#' @param slope Slope in degrees, from 1-60 degrees.
+#' @param aspect Aspect in degrees.
+#' @param latitude Latitude in degrees
+#' @export
+#' get_heatload()
+
+get_heatload <- function(slope, aspect, latitude) {
+  folded_aspect_rad <- deg2rad(fold_aspect(aspect))
+  slope_rad <- deg2rad(slope)
+  lat_rad <- deg2rad(latitude)
+
+  heatload <- 0.339 +
+    0.808 * (cos(lat_rad) * cos(slope_rad)) +
+    -0.196 * (sin(lat_rad) * sin(slope_rad)) +
+    -0.482 * (cos(folded_aspect_rad) * sin(slope_rad))
+
+  return(heatload)
+}
+
+
 
 #' Oudin Daily PET
 #'
 #' Calculates PET (mm) based on temperature, latitude, and solar radiation 
 #' @param doy Day-of-year (Julian date)
-#' @param lat Latitude of the site (degrees).
+#' @param lat Latitude of the site (degrees) from 30-60 degrees.
 #' @param snowpack A time series vector of snowpack accumulation values.
 #' @param tmean A vector of daily mean temperatures (deg C).
 #' @param slope Slope of the site (in degrees).
@@ -239,16 +287,14 @@ ET_PenmanMonteith_daily = function(x, elev, lat, wind=NULL){
 #' @export
 #' get_OudinPET()
 
-get_OudinPET = function(doy, lat, snowpack, tmean, slope, aspect, shade.coeff=NULL){
+get_OudinPET = function(doy, lat, snowpack, tmean, slope, aspect, shade.coeff=1){
   d.r = 1 + 0.033*cos((2*pi/365)*doy)
   declin = 0.409*sin((((2*pi)/365)*doy)-1.39)
-  lat.rad = (pi/180)*lat
+  lat.rad = deg2rad(lat)
   sunset.ang = acos(-tan(lat.rad)*tan(declin))
   R.a = ((24*60)/pi)*0.082*d.r*((sunset.ang*sin(lat.rad)*sin(declin)) + (cos(lat.rad)*cos(declin)*sin(sunset.ang)))
   Oudin = ifelse(snowpack>2,0,ifelse(tmean>-5,(R.a*(tmean+5)*0.408)/100,0))
-  Folded_aspect = abs(180-abs((aspect)-225))
-  Heatload = (0.339+0.808*cos(lat*(pi/180))*cos(slope*(pi/180)))-(0.196*sin(lat.rad)*sin(slope*(pi/180)))-(0.482*cos(Folded_aspect*(pi/180))*sin(slope*(pi/180)))
-  sc = ifelse(!is.null(shade.coeff), shade.coeff, 1)
-  OudinPET = Oudin * Heatload * sc
+  Heatload = get_heatload(slope, aspect, lat)
+  OudinPET = Oudin * Heatload * shade.coeff
   return(OudinPET)
 }
